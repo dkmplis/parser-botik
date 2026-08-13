@@ -1,0 +1,11 @@
+services:
+  barsik_bot:
+    build: .
+    container_name: barsik_bot_container
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      - TZ=Europe/Minsk
+    volumes:
+      - ./data:/app/data
