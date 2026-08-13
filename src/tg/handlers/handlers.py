@@ -1,86 +1,142 @@
-from aiogram import Router, F
-from aiogram.filters import CommandStart, Command
-from aiogram.types import Message, CallbackQuery
-from src.tg.config_manager import load_config, save_config
-from src.tg.keyboards import build_subscriptions_keyboard
-from src.db.user_requests import check_user_exists, create_user
+import logging
 
+from aiogram import F, Router
+from aiogram.exceptions import TelegramBadRequest
+from aiogram.filters import Command, CommandStart, StateFilter
+from aiogram.fsm.context import FSMContext
+from aiogram.types import CallbackQuery, Message
+
+from src.db.user_requests import check_user_exists, create_user
+from src.platforms import PLATFORMS_REGISTRY
+from src.tg.keyboards import (
+    build_main_reply_keyboard,
+    build_registry_platform_keyboard,
+    build_registry_subscription_keyboard,
+)
+
+logger = logging.getLogger(__name__)
 router = Router()
 
 
 @router.message(CommandStart())
-async def command_start_handler(message: Message):
+async def command_start_handler(message: Message, state: FSMContext):
+    await delete_previos_menu(message, state)
     tg_id = message.from_user.id
-    if not check_user_exists(tg_id):
-        create_user(tg_id)
+    if not await check_user_exists(tg_id):
+        await create_user(tg_id)
     await message.answer(
-        "Привет! Я помогу отслеживать новые объявления.\n\n"
-        "Добавьте товары для поиска с помощью команды /add\n"
-        "Для просмотра списка отслеживаемых товаров и их удаления используйте /list")
+        "👋 **Привет! Я помогу отслеживать новые объявления.**\n\n"
+        "Вы можете управлять ботом с помощью **кнопок меню внизу экрана** 👇\n\n"
+        "Или использовать быстрые команды:\n"
+        "🔹 /add — добавить новый товар для отслеживания\n"
+        "🔹 /list — посмотреть или удалить ваши подписки\n",
+        parse_mode="Markdown",
+        reply_markup=build_main_reply_keyboard(),
+    )
+    await delete_message(message)
 
 
-@router.message(Command('list'))
-async def list_orders_handler(message: Message):
-    config = load_config()
-    user_id = str(message.from_user.id)
-    user_orders_list = config.get(user_id, [])
-    if not user_orders_list:
-        await message.answer(
-            "У вас пока нет активных подписок. Для добавления используйте команду /add"
-        )
-        return
-    response_text = "Ваши активные подписки:\n\nНажмите на товар, который хотите удалить из поиска:"
+@router.message(Command("add"))
+@router.message(F.text == "➕ Добавить")
+async def add_tracking(message: Message, state: FSMContext):
+    await delete_previos_menu(message, state)
+    await state.clear()
+    sent_message = await message.answer(
+        "Давай начнем слежку, выбери интересующую платформу",
+        reply_markup=build_registry_platform_keyboard("add"),
+    )
+    await state.update_data(last_menu_msg_id=sent_message.message_id)
+    await delete_message(message)
 
-    await message.answer(
-        text=response_text,
-        reply_markup=build_subscriptions_keyboard(user_orders_list)
+
+@router.message(Command("list"))
+@router.message(F.text == "📋 Список")
+async def process_list(message: Message, state: FSMContext):
+    await delete_previos_menu(message, state)
+    await state.clear()
+    sent_message = await message.answer(
+        text="Выберите платформу", reply_markup=build_registry_platform_keyboard("list")
+    )
+    await state.update_data(last_menu_msg_id=sent_message.message_id)
+    await delete_message(message)
+
+
+@router.callback_query(StateFilter(None), F.data.startswith("add_"))
+async def process_add_start(callback: CallbackQuery, state: FSMContext):
+    platform_id = callback.data.replace("add_", "")
+    platform_data = PLATFORMS_REGISTRY.get(platform_id)
+    if not platform_data:
+        return await callback.answer("Платформа не найдена", show_alert=True)
+
+    await state.set_state(platform_data["add_state"])
+    kb_func = platform_data["add_kb"]
+    await callback.message.edit_text(
+        text=platform_data["add_text"], reply_markup=kb_func(
+        ) if kb_func else None
     )
 
 
-@router.message(Command('add'))
-async def orders_handler(message: Message):
-    config = load_config()
-    orders_str = message.text[4:].strip()
-    if not orders_str:
-        await message.answer("Введите интересующие товары. Пример \"/add iphone, рыба\"")
-        return
-    orders_new = [item.strip().lower() for item in orders_str.split(",")]
-    user_id = str(message.from_user.id)
-    existing_orders = set(config.get(user_id, []))
-    new_unique_orders = [
-        item for item in orders_new if item not in existing_orders]
-    if not new_unique_orders:
-        await message.answer("Все эти товары отслеживаются!")
-        return
+@router.callback_query(StateFilter(None), F.data.startswith("list_"))
+async def process_list_show(callback: CallbackQuery, state: FSMContext):
+    platform_id = callback.data.replace("list_", "")
+    platform_data = PLATFORMS_REGISTRY.get(platform_id)
+    if not platform_data:
+        return await callback.answer("Ошибка платформы", show_alert=True)
 
-    unique_orders = [*existing_orders, *new_unique_orders]
-    config[user_id] = unique_orders
-
-    save_config(config)
-
-    response_text = "В ваш список добавлены позиции:\n" + \
-        "\n".join(f"- {item}" for item in new_unique_orders)
-
-    await message.answer(response_text)
-
-
-@router.callback_query(F.data.startswith("del_"))
-async def delete_order_callback(callback: CallbackQuery):
-    index_for_delete = int(callback.data.split('_')[1])
-    user_id = str(callback.from_user.id)
-    config = load_config()
-    orders_list = config[user_id]
-    removed_item = orders_list.pop(index_for_delete)
-    config[user_id] = orders_list
-    save_config(config)
-    await callback.answer(f"Удаленно: {removed_item}")
-    if orders_list:
-        response_text = (
-            "Ваши активные подписки:\n\n"
-            "Нажмите на товар, который хотите удалить из поиска:"
+    subs = await platform_data["func_list"](callback.from_user.id)
+    if not subs:
+        return await callback.answer(
+            "У вас нет подписок в этой категории", show_alert=True
         )
+
+    await callback.message.edit_text(
+        text=f"{platform_data['title']} (нажмите что бы удалить)",
+        reply_markup=build_registry_subscription_keyboard(
+            subs, platform_id, platform_data["format_item"]
+        ),
+    )
+
+
+@router.callback_query(StateFilter(None), F.data.startswith("del_"))
+async def process_delete_sub(callback: CallbackQuery):
+    parts = callback.data.split("_")
+    sub_id = int(parts[-1])
+    platform_id = "_".join(parts[1:-1])
+    platform_data = PLATFORMS_REGISTRY.get(platform_id)
+
+    if platform_data:
+        await platform_data["func_delete"](sub_id)
+        subs = await platform_data["func_list"](callback.from_user.id)
+        if not subs:
+            await callback.message.edit_text(
+                "У вас нет подписок в этой категории", show_alert=True
+            )
+            return await callback.answer()
         await callback.message.edit_text(
-            text=response_text,
-            reply_markup=build_subscriptions_keyboard(orders_list))
+            f"{platform_data['title']} (нажмите что бы удалить)",
+            reply_markup=build_registry_subscription_keyboard(
+                subs, platform_id, platform_data["format_item"]
+            ),
+        )
     else:
-        await callback.message.edit_text("Все подписки удаленны")
+        await callback.answer("Ошибка при удалении", show_alert=True)
+
+
+async def delete_previos_menu(message: Message, state: FSMContext):
+    state_data = await state.get_data()
+    last_msg_id = state_data.get("last_menu_msg_id")
+
+    if last_msg_id:
+        try:
+            await message.bot.delete_message(
+                chat_id=message.chat.id, message_id=last_msg_id
+            )
+        except TelegramBadRequest as e:
+            logger.warning(f"Ошибка при удалении сообщения: {e}")
+
+
+async def delete_message(message: Message):
+    try:
+        await message.delete()
+    except TelegramBadRequest as e:
+        logger.warning(f"Ошибка при удалении сообщения: {e}")
