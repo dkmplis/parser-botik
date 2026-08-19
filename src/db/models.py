@@ -4,7 +4,7 @@ from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
 from src.deal_type import DealType
 
-engine = create_async_engine("sqlite+aiosqlite:///bot_database.db", echo=True)
+engine = create_async_engine("sqlite+aiosqlite:///data/bot_database.db", echo=True)
 AsyncSessionLocal = async_sessionmaker(
     engine, class_=AsyncSession, expire_on_commit=False
 )
