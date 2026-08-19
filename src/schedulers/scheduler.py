@@ -87,9 +87,10 @@ def _build_params_for_realty(sub: KufarRealtySubscription) -> dict:
 
 
 def _build_params_for_kufar(sub: KufarSubscription) -> dict:
-    params = {"cmp": "0", "lang": "ru", "ot": "1", "size": "10", "sort": "lst.d"}
+    params = {"cmp": "0", "lang": "ru", "size": "10", "sort": "lst.d"}
     if sub.region_id:
         params["rgn"] = sub.region_id
-        params["ar"] = sub.area_id if sub.area_id else None
+        if sub.area_id:
+            params["ar"] = sub.area_id
     params["query"] = sub.query
     return params
